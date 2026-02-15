@@ -8,7 +8,6 @@ Hardware Checklist
 	•	GND: GND
 	•	L/R: GND (for Left Channel) or VDD (for Right Channel).
 	◦	Note on "G mod ch2": If your mic is set to Channel 2 (Right), the code below handles it.
-	•	
 ———————————————————————————————————————————
 #include <WiFi.h>
 #include <WebSocketsClient.h>
