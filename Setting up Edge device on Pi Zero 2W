@@ -1,0 +1,384 @@
+Setting up Edge device on Pi Zero 2W
+
+
+Phase 0: Notion Backend Setup
+You need to create a "digital brain" for your Array Button to talk to.
+Step 1: Create the "Bot" (Integration)
+	1	Go to Notion My Integrations in your browser.
+	2	Click + New integration.
+	3	Name: Array Button.
+	4	Associated Workspace: Select your main workspace.
+	5	Type: Internal Integration.
+	6	Click Submit.
+	7	⚠️ COPY THE SECRET: You will see a long code starting with secret_....
+	◦	Save this! This is your NOTION_TOKEN.
+Step 2: Create the Inventory Database
+	1	Open Notion and create a new Page.
+	2	Type /database and select Database - Inline.
+	3	Name it "Site Inventory".
+	4	Setup the Columns (Properties):
+	◦	Column 1 (Name): Rename to Item Name. (Type: Title)
+	◦	Column 2: Rename to quantity used. (Type: Number) -> Crucial: Must be lowercase 'q' if that's what the code expects, but typically Notion defaults to Title Case. The script uses "quantity used", so name it exactly that.
+	◦	Column 3: Rename to Person. (Type: Person)
+	◦	Optional: Add a "Date" column (Type: Created time) to auto-log when it happened.
+	5	Pre-fill the Items:
+	◦	Add rows for: Cement, Bricks, Steel, Sand, Water.
+	◦	Note: The script looks for exact text matches, so ensure these exist.
+Step 3: Give the Bot Permission
+	1	Go to your new "Site Inventory" database page.
+	2	Click the Three Dots (...) at the top right of the page.
+	3	Scroll down to Connect to (or "Add connections").
+	4	Search for "Array Button" (the integration you created in Step 1).
+	5	Click it and confirm.
+	◦	If you don't do this, the Pi will get a "404 Not Found" error.
+Step 4: Get the Database ID
+	1	Click the Share button (top right) -> Copy link.
+	2	Paste the link into a notepad. It will look like this: https://www.notion.so/username/819b3a3d87244fe9820fae78679602d4?v=...
+	3	Extract the ID: It is the 32-character code between the slash / and the question mark ?.
+	◦	Example ID: 819b3a3d87244fe9820fae78679602d4
+	◦	Save this! This is your DATABASE_ID.
+
+
+Phase 1: Hardware Wiring (INMP441 to Raspberry Pi)
+First, connect the microphone to the Raspberry Pi GPIO pins.
+INMP441 Pin
+Raspberry Pi Pin
+Description
+VDD
+Pin 1 (3.3V)
+Power
+GND
+Pin 6 (GND)
+Ground
+SD
+Pin 38 (GPIO 20)
+Data In (PCM DIN)
+WS
+Pin 35 (GPIO 19)
+Word Select (PCM FS)
+SCK
+Pin 12 (GPIO 18)
+Clock (PCM CLK)
+L/R
+GND
+Set to Left Channel
+
+
+——————————
+
+Phase 2: Enable I2S Audio on the Pi
+
+SSH into your Pi:
+ssh pi@your-pi-ip
+
+Edit the Boot Config:
+
+sudo nano /boot/config.txt
+# Note: On Raspberry Pi OS Bookworm, use: sudo nano /boot/firmware/config.txt
+
+Uncomment (or add) this line at the bottom:
+
+dtparam=i2s=on
+
+Save & Exit: Press Ctrl+X, then Y, then Enter.
+Compile the I2S Module (This enables the "Dummy" driver so the Pi sees the mic):
+# Run this single long command to create the module loader
+sudo curl -L https://raw.githubusercontent.com/shreyasssrai/ArrayButton/main/i2s_mic_module.sh | bash
+
+Note: If the link above doesn't work, typically you just need to load snd-i2s-rpi-simple. For now, let's assume standard I2S activation. If you are on a fresh OS, just enabling dtparam=i2s=on is often enough for raw access, but installing the rpi-i2s-audio loader is better).
+Alternative (Easier): Edit /etc/modules:
+sudo nano /etc/modules
+Add:
+snd-bcm2835
+
+Reboot the Pi:
+sudo reboot
+
+Verify Microphone: After rebooting, run:
+arecord -l
+You should see a card listed (often Card 0 or Card 1 named snd_rpi_i2s_card or similar).
+
+Phase 3: Install Software & Dependencies
+Update System:  sudo apt update && sudo apt upgrade -y 
+Install System Audio Libraries:  sudo apt install python3-pip python3-venv libatlas-base-dev portaudio19-dev -y 
+Create a Virtual Environment (Recommended for Pi OS Bookworm):  python3 -m venv venv
+     source venv/bin/activate
+ 
+Install Python Libraries:  pip install sounddevice vosk requests rapidfuzz word2number 
+Phase 4: Download the AI Model
+
+Create a folder:
+mkdir array_button
+cd array_button
+
+Download Vosk Small Model:
+
+wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+unzip vosk-model-small-en-us-0.15.zip
+mv vosk-model-small-en-us-0.15 model  # Rename it to just 'model'
+rm vosk-model-small-en-us-0.15.zip
+
+
+
+
+Create the Script
+
+nano main.py
+
+paste 
+
+import sys
+import os
+import queue
+import sounddevice as sd
+import vosk
+import json
+import requests
+import time
+import re  # Added for better number finding
+from rapidfuzz import process, fuzz
+from word2number import w2n
+
+# --- 🟢 CONFIGURATION ---
+DATABASE_ID = "679602d4-fe9a-820f-ae78-819b3a3d8724"
+NOTION_TOKEN = "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"
+
+# The Name to search for in your Notion User List
+TARGET_PERSON_NAME = "Shreyas" 
+
+# --- KNOWLEDGE BASE ---
+INVENTORY_ITEMS = [
+    "Cement", "Bricks", "Dust", "Steel", 
+    "Water", "Product", "Sand"
+]
+
+# --- TUNING ---
+WAKE_SENSITIVITY = 70
+LISTENING_TIMEOUT = 10 
+
+# --- SETUP ---
+if not os.path.exists("model"):
+    print("❌ Error: 'model' folder not found.")
+    sys.exit(1)
+
+vosk.SetLogLevel(-1)
+print("🚀 Loading Inventory System...")
+model = vosk.Model("model")
+q = queue.Queue()
+
+USER_ID = None
+
+def callback(indata, frames, time, status):
+    q.put(bytes(indata))
+
+def get_user_id():
+    """Fetches the Notion User ID for Shreyas"""
+    print(f"🔎 Looking for user '{TARGET_PERSON_NAME}'...")
+    url = "https://api.notion.com/v1/users"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28"
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            users = response.json().get("results", [])
+            for user in users:
+                name = user.get("name", "")
+                if TARGET_PERSON_NAME.lower() in name.lower():
+                    print(f"   ✅ Found User: {name}")
+                    return user['id']
+            print(f"   ⚠️ User '{TARGET_PERSON_NAME}' not found.")
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+    return None
+
+USER_ID = get_user_id()
+
+def get_page_id(item_name):
+    print(f"   🔎 Searching for existing '{item_name}' row...")
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28" 
+    }
+    try:
+        response = requests.post(url, headers=headers, json={})
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            for page in results:
+                props = page.get("properties", {})
+                title_prop = props.get("Item Name", {}).get("title", [])
+                if title_prop:
+                    db_item_name = title_prop[0].get("text", {}).get("content", "")
+                    if db_item_name.strip().lower() == item_name.strip().lower():
+                        print(f"   ✅ Found match: '{db_item_name}'")
+                        return page['id']
+            print(f"   ⚠️ Item '{item_name}' not found.")
+            return None
+        else:
+            print(f"❌ Search Error: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+        return None
+
+def update_usage(item_name, quantity):
+    print(f"\n--> 📉 Processing: {item_name} -> {quantity}...")
+    page_id = get_page_id(item_name)
+    if not page_id: return False
+
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28" 
+    }
+    
+    properties = {
+        "quantity used": {"number": int(quantity)}
+    }
+    if USER_ID:
+        properties["Person"] = { "people": [{"id": USER_ID}] }
+    
+    data = {"properties": properties}
+    
+    try:
+        response = requests.patch(url, headers=headers, json=data)
+        if response.status_code == 200:
+            print(f"✅ SUCCESS! Updated '{item_name}' usage to {quantity}")
+            return True
+        else:
+            print(f"❌ Update Error: {response.status_code}")
+            print(f"   Reason: {response.text}")
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+    return False
+
+# --- 🧠 IMPROVED NUMBER EXTRACTION ---
+def extract_number(text):
+    text = text.lower()
+    
+    # 1. Fix common Homophones (Pronunciation errors)
+    corrections = {
+        " to ": " two ", 
+        " too ": " two ",
+        " for ": " four ", 
+        " fore ": " four ",
+        " won ": " one ",
+        " ate ": " eight ",
+        " tree ": " three "
+    }
+    for wrong, right in corrections.items():
+        text = text.replace(wrong, right)
+
+    # 2. Look for digits (e.g. "50")
+    digits = re.findall(r'\d+', text)
+    if digits:
+        return int(digits[0])
+
+    # 3. Filter only number words for w2n
+    # This helps if you say "Cement twenty five", w2n sees only "twenty five"
+    number_words = {
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+        "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        "hundred", "thousand"
+    }
+    
+    clean_words = [word for word in text.split() if word in number_words]
+    
+    if clean_words:
+        clean_text = " ".join(clean_words)
+        try:
+            return w2n.word_to_num(clean_text)
+        except ValueError:
+            pass
+            
+    return None
+
+def check_wake_word(text):
+    if len(text) < 4: return False
+    triggers = ["button", "hey button", "hello button", "wake up", "ok button"]
+    match = process.extractOne(text, triggers, scorer=fuzz.partial_ratio)
+    if match and match[1] >= WAKE_SENSITIVITY:
+        print(f"\n⚡ Wake Trigger: '{match[0]}'")
+        return True
+    return False
+
+# --- MAIN LOOP ---
+is_listening_mode = False
+listen_start_time = 0
+accumulated_text = ""
+
+try:
+    with sd.RawInputStream(samplerate=16000, blocksize=4000, device=None,
+                           dtype='int16', channels=1, callback=callback):
+        
+        print("\n" + "="*40)
+        print("🚀 INVENTORY BOT: READY")
+        print("   1. Say 'Button'")
+        print("   2. Say 'Used Cement for 20'")
+        print("   (I can now understand 'to', 'for', 'ate' as numbers!)")
+        print("========================================")
+        
+        rec = vosk.KaldiRecognizer(model, 16000)
+        
+        while True:
+            if is_listening_mode:
+                elapsed = time.time() - listen_start_time
+                if elapsed > LISTENING_TIMEOUT:
+                    print("\n⌛ Timeout. Resetting...")
+                    is_listening_mode = False
+                    accumulated_text = ""
+            
+            data = q.get()
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                text = result.get('text', '')
+                
+                if text:
+                    if not is_listening_mode:
+                        sys.stdout.write("\033[K") 
+                        if check_wake_word(text):
+                            is_listening_mode = True
+                            listen_start_time = time.time()
+                            accumulated_text = ""
+                            print("🟢 LISTENING... (Tell me what was used)")
+                        else:
+                            print(f"\r(Noise): {text}", end="")
+                    else:
+                        accumulated_text += " " + text
+                        print(f"\r📝 Hearing: '{accumulated_text.strip()}'", end="")
+                        
+                        item_match = process.extractOne(accumulated_text, INVENTORY_ITEMS, scorer=fuzz.partial_ratio)
+                        quantity = extract_number(accumulated_text)
+                        
+                        if item_match and item_match[1] > 60 and quantity is not None:
+                            detected_item = item_match[0]
+                            print(f"\n\n✅ DETECTED: {detected_item} | {quantity}")
+                            update_usage(detected_item, quantity)
+                            is_listening_mode = False
+                            accumulated_text = ""
+                            print("💤 Done. Sleeping...")
+                        
+            else:
+                if is_listening_mode:
+                    partial = json.loads(rec.PartialResult()).get('partial', '')
+                    if partial:
+                        sys.stdout.write(f"\r👂 {partial}")
+                        sys.stdout.flush()
+
+except KeyboardInterrupt:
+    print("\n🔴 Stopping.")
+
+Run It!
+How to run 
+
+python3 main.py
+
+
+
+
+
