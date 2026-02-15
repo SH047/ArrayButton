@@ -1,0 +1,50 @@
+websockets
+pip3 install websockets
+Set up Google Sheets (Crucial)
+For the system to have a memory, we need a database.
+	1	Create a New Google Sheet named ArrayButton_DB.
+	2	Create 2 Tabs:
+	◦	Tab 1 Name: Logs (Columns: Timestamp, Node_ID, Person, Item Name, Quantity, Action)
+	◦	Tab 2 Name: Inventory (Columns: Item Name, Total, Unit, Threshold, Status)
+	◦	Fill Inventory with dummy data (e.g., Cement | 500 | bags | 100 | In Stock).
+	3	Get Credentials:
+	◦	Go to Google Cloud Console.
+	◦	Create a project → Enable Google Sheets API and Google Drive API.
+	◦	Create Service Account → Keys → Download JSON.
+	◦	Rename this file to credentials.json and put it in your folder.
+	◦	Share your Google Sheet with the weird email address found inside credentials.json (e.g., array-button@project-id.iam.gserviceaccount.com) as an Editor.
+Install FFmpeg (using Homebrew):
+brew install ffmpeg
+
+Install Whisper:
+python3 -m pip install openai-whisper soundfile numpy --break-system-packages
+
+
+Install Dependencies
+
+pip3 install gspread oauth2client pandas plotly streamlit-autorefresh websockets vosk openai-whisper rapidfuzz word2number --break-system-packages
+
+pip3 install gspread oauth2client pandas plotly streamlit-autorefresh --break-system-packages
+
+Vosk model installation 
+ON THE TERMINAL OF THE PC .
+
+# 1. Download the Indian English Model (40MB)
+curl -LO https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip
+
+# 2. Unzip it
+unzip vosk-model-small-en-in-0.4.zip
+
+# 3. Rename it to "model" so server.py can find it
+mv vosk-model-small-en-in-0.4 model
+
+# 4. Delete the zip file to save space
+rm vosk-model-small-en-in-0.4.zip
+
+echo "✅ Model installed successfully!"
+
+MAIN RUNNER CMD 
+
+streamlit run dashboard.py 
+
+python3 server.py
