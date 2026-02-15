@@ -1,0 +1,189 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2867
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\froman\fcharset0 Times-Bold;\f1\froman\fcharset0 Times-Roman;\f2\fmodern\fcharset0 Courier;
+\f3\froman\fcharset0 TimesNewRomanPS-BoldMT;\f4\froman\fcharset0 Times-Italic;\f5\froman\fcharset0 TimesNewRomanPS-ItalicMT;
+\f6\fmodern\fcharset0 Courier-Oblique;\f7\froman\fcharset0 TimesNewRomanPSMT;\f8\fswiss\fcharset0 Helvetica;
+\f9\fswiss\fcharset0 Helvetica-Oblique;\f10\fnil\fcharset0 AppleColorEmoji;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red0\green0\blue233;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;\cssrgb\c0\c0\c93333;}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc0\levelnfcn0\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{decimal\}}{\leveltext\leveltemplateid1\'01\'00;}{\levelnumbers\'01;}\fi-360\li720\lin720 }{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{circle\}}{\leveltext\leveltemplateid2\'01\uc0\u9702 ;}{\levelnumbers;}\fi-360\li1440\lin1440 }{\listname ;}\listid1}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs36 \cf0 \expnd0\expndtw0\kerning0
+websockets
+\fs24 \
+pip3 install websockets
+\fs28 \
+Set up Google Sheets (Crucial)\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 For the system to have a memory, we need a database.\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls1\ilvl0
+\f0\b \cf0 \kerning1\expnd0\expndtw0 {\listtext	1	}\expnd0\expndtw0\kerning0
+Create a New Google Sheet
+\f1\b0  named 
+\f2\fs26 ArrayButton_DB
+\f1\fs24 .\
+\ls1\ilvl0
+\f0\b \kerning1\expnd0\expndtw0 {\listtext	2	}\expnd0\expndtw0\kerning0
+Create 2 Tabs:
+\f1\b0 \
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls1\ilvl1
+\f0\b \cf0 \kerning1\expnd0\expndtw0 {\listtext	
+\f3 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+Tab 1 Name:
+\f1\b0  
+\f2\fs26 Logs
+\f1\fs24  (Columns: 
+\f2\fs26 Timestamp
+\f1\fs24 , 
+\f2\fs26 Node_ID
+\f1\fs24 , 
+\f2\fs26 Person
+\f1\fs24 , 
+\f2\fs26 Item Name
+\f1\fs24 , 
+\f2\fs26 Quantity
+\f1\fs24 , 
+\f2\fs26 Action
+\f1\fs24 )\
+\ls1\ilvl1
+\f0\b \kerning1\expnd0\expndtw0 {\listtext	
+\f3 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+Tab 2 Name:
+\f1\b0  
+\f2\fs26 Inventory
+\f1\fs24  (Columns: 
+\f2\fs26 Item Name
+\f1\fs24 , 
+\f2\fs26 Total
+\f1\fs24 , 
+\f2\fs26 Unit
+\f1\fs24 , 
+\f2\fs26 Threshold
+\f1\fs24 , 
+\f2\fs26 Status
+\f1\fs24 )\
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls1\ilvl1
+\f4\i \cf0 \kerning1\expnd0\expndtw0 {\listtext	
+\f5 \uc0\u9702 
+\f4 	}\expnd0\expndtw0\kerning0
+Fill 
+\f6\fs26 Inventory
+\f4\fs24  with dummy data (e.g., Cement | 500 | bags | 100 | In Stock)
+\f1\i0 .\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls1\ilvl0
+\f0\b \cf0 \kerning1\expnd0\expndtw0 {\listtext	3	}\expnd0\expndtw0\kerning0
+Get Credentials:
+\f1\b0 \
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls1\ilvl1\cf0 \kerning1\expnd0\expndtw0 {\listtext	
+\f7 \uc0\u9702 
+\f1 	}\expnd0\expndtw0\kerning0
+Go to {\field{\*\fldinst{HYPERLINK "https://console.cloud.google.com/"}}{\fldrslt 
+\f0\b \cf3 \ul \ulc3 Google Cloud Console}}.\
+\ls1\ilvl1\kerning1\expnd0\expndtw0 {\listtext	
+\f7 \uc0\u9702 
+\f1 	}\expnd0\expndtw0\kerning0
+Create a project 
+\f7 \uc0\u8594 
+\f1  Enable 
+\f0\b Google Sheets API
+\f1\b0  and 
+\f0\b Google Drive API
+\f1\b0 .\
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls1\ilvl1
+\f0\b \cf0 \kerning1\expnd0\expndtw0 {\listtext	
+\f3 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+Create Service Account
+\f1\b0  
+\f7 \uc0\u8594 
+\f1  Keys 
+\f7 \uc0\u8594 
+\f1  
+\f0\b Download JSON
+\f1\b0 .\
+\ls1\ilvl1
+\f0\b \kerning1\expnd0\expndtw0 {\listtext	
+\f3 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+Rename
+\f1\b0  this file to 
+\f2\fs26 credentials.json
+\f1\fs24  and put it in your folder.\
+\ls1\ilvl1
+\f0\b \kerning1\expnd0\expndtw0 {\listtext	
+\f3 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+Share your Google Sheet
+\f1\b0  with the weird email address found inside 
+\f2\fs26 credentials.json
+\f1\fs24  (e.g., 
+\f2\fs26 array-button@project-id.iam.gserviceaccount.com
+\f1\fs24 ) as an 
+\f0\b Editor
+\f1\b0 .\
+\pard\pardeftab720\partightenfactor0
+
+\fs28 \cf0 Install FFmpeg (using Homebrew):
+\fs24 \
+brew install ffmpeg\
+\
+
+\fs28 Install Whisper:
+\fs24 \
+python3 -m pip install openai-whisper soundfile numpy --break-system-packages\
+\
+\
+
+\fs36 Install Dependencies
+\fs24 \
+\pard\pardeftab720\partightenfactor0
+
+\f8 \cf0 \kerning1\expnd0\expndtw0 \
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardeftab720\pardirnatural\partightenfactor0
+\cf0 pip3 install gspread oauth2client pandas plotly streamlit-autorefresh websockets vosk openai-whisper rapidfuzz word2number --break-system-packages\
+\
+pip3 install gspread oauth2client pandas plotly streamlit-autorefresh --break-system-packages\
+\
+
+\fs36 Vosk model installation \
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardeftab720\pardirnatural\partightenfactor0
+
+\f9\i\fs28 \cf0 ON THE TERMINAL OF THE PC .\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardeftab720\pardirnatural\partightenfactor0
+
+\f8\i0\fs24 \cf0 \
+# 1. Download the Indian English Model (40MB)\
+curl -LO https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip\
+\
+# 2. Unzip it\
+unzip vosk-model-small-en-in-0.4.zip\
+\
+# 3. Rename it to "model" so server.py can find it\
+mv vosk-model-small-en-in-0.4 model\
+\
+# 4. Delete the zip file to save space\
+rm vosk-model-small-en-in-0.4.zip\
+\
+echo "
+\f10 \uc0\u9989 
+\f8  Model installed successfully!"\
+\
+
+\fs36 MAIN RUNNER CMD 
+\fs24 \
+\
+streamlit run dashboard.py \
+\
+python3 server.py}
