@@ -1,0 +1,288 @@
+The Store-and-Forward ESP32 Code
+
+This code detects volume, records to SD card, and automatically uploads when WiFi connects.
+
+
+Component,Pin Name,ESP32-C3 Pin,Role
+SD Card,SCK,GPIO 4,SPI Clock
+SD Card,MISO,GPIO 5,SPI Data In
+SD Card,MOSI,GPIO 6,SPI Data Out
+SD Card,CS,GPIO 7,Chip Select
+SD Card,VCC,5V,Power
+SD Card,GND,GND,Ground
+,,,
+ICS-43434,SCK (BCLK),GPIO 8,I2S Bit Clock
+ICS-43434,WS (LRCK),GPIO 9,I2S Word Select
+ICS-43434,SD (DOUT),GPIO 10,I2S Data
+ICS-43434,VCC,3.3V,Must be 3.3V
+ICS-43434,GND,GND,Ground
+
+_________________________________________
+
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <driver/i2s.h>
+#include <SPI.h>
+#include <SD.h>
+
+// ==========================================
+// 🔴 CONFIGURATION
+// ==========================================
+const char* DEVICE_ID = "Node_C";
+const char* USER_NAME = "Manoj"; // Server maps this to 'charlie'
+
+// 🔵 WIFI SETTINGS
+const char* ssid = "Airtel_Zerotouch";
+const char* password = "Airtel@123";
+
+// 🟢 SERVER SETTINGS
+const char* server_ip = "192.168.1.34"; 
+const int server_port = 8765;
+
+// ==========================================
+// ⚙️ PIN CONFIGURATION
+// ==========================================
+#define SD_SCK  4
+#define SD_MISO 5
+#define SD_MOSI 6
+#define SD_CS   7
+
+// MICROPHONE (SCK Moved to 2 to prevent Boot Loop)
+#define I2S_WS  9
+#define I2S_SD  10
+#define I2S_SCK 2  
+
+// LED Indication
+#define LED_PIN 8 
+
+// Audio Config
+#define I2S_PORT I2S_NUM_0
+#define SAMPLE_RATE 16000
+#define RECORD_TIME_SEC 4
+#define VOLUME_THRESHOLD 1500  // Sensitivity for Wake Word
+#define DMA_BUF_LEN 256
+
+// ==========================================
+// 📝 GLOBALS
+// ==========================================
+WebSocketsClient webSocket;
+bool isServerConnected = false;
+int file_index = 0;
+
+struct wav_header_t {
+  char riff_tag[4]; uint32_t riff_length; char wave_tag[4]; char fmt_tag[4];
+  uint32_t fmt_length; uint16_t audio_format; uint16_t num_channels;
+  uint32_t sample_rate; uint32_t byte_rate; uint16_t block_align;
+  uint16_t bits_per_sample; char data_tag[4]; uint32_t data_length;
+};
+
+// ==========================================
+// 🛠️ SETUP FUNCTIONS
+// ==========================================
+void i2s_install() {
+  const i2s_config_t i2s_config = {
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // Try RIGHT if silent
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S),
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8, .dma_buf_len = DMA_BUF_LEN, .use_apll = false
+  };
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+}
+
+void i2s_setpin() {
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK, .ws_io_num = I2S_WS, .data_out_num = -1, .data_in_num = I2S_SD
+  };
+  i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+void generateWavHeader(wav_header_t *header, int wavSize) {
+  memcpy(header->riff_tag, "RIFF", 4); header->riff_length = wavSize + sizeof(wav_header_t) - 8;
+  memcpy(header->wave_tag, "WAVE", 4); memcpy(header->fmt_tag, "fmt ", 4);
+  header->fmt_length = 16; header->audio_format = 1; header->num_channels = 1;
+  header->sample_rate = SAMPLE_RATE; header->byte_rate = SAMPLE_RATE * 2;
+  header->block_align = 2; header->bits_per_sample = 16;
+  memcpy(header->data_tag, "data", 4); header->data_length = wavSize;
+}
+
+// ==========================================
+// 🎤 RECORDING LOGIC (EDGE)
+// ==========================================
+void recordToQueue() {
+  // 1. LED Solid ON (Recording)
+  digitalWrite(LED_PIN, LOW); // Active LOW -> ON
+  
+  String fileName = "/queue_" + String(millis()) + ".wav";
+  Serial.print("🎙️ TRIGGER! Recording to: "); Serial.println(fileName);
+
+  File file = SD.open(fileName, FILE_WRITE);
+  if (!file) { Serial.println("❌ SD Write Error"); return; }
+
+  wav_header_t header;
+  file.write((uint8_t*)&header, sizeof(wav_header_t));
+
+  const int chunk_samples = 256;
+  int32_t i2s_buffer[chunk_samples];
+  int16_t wav_buffer[chunk_samples];
+  
+  size_t bytesIn = 0;
+  uint32_t total_bytes = 0;
+  uint32_t end_time = millis() + (RECORD_TIME_SEC * 1000);
+
+  // Give user a moment to breathe/start speaking after trigger
+  delay(100); 
+
+  while (millis() < end_time) {
+    i2s_read(I2S_PORT, &i2s_buffer, chunk_samples * sizeof(int32_t), &bytesIn, portMAX_DELAY);
+    if (bytesIn > 0) {
+      int samples = bytesIn / 4;
+      for (int i = 0; i < samples; i++) {
+        wav_buffer[i] = (int16_t)(i2s_buffer[i] >> 14); // Volume Adjust
+      }
+      file.write((uint8_t*)wav_buffer, samples * sizeof(int16_t));
+      total_bytes += samples * sizeof(int16_t);
+    }
+  }
+
+  generateWavHeader(&header, total_bytes);
+  file.seek(0);
+  file.write((uint8_t*)&header, sizeof(wav_header_t));
+  file.close();
+
+  Serial.println("✅ Recording Saved.");
+  digitalWrite(LED_PIN, HIGH); // Turn OFF
+  delay(500); // Debounce
+}
+
+// ==========================================
+// ☁️ UPLOAD LOGIC
+// ==========================================
+void checkAndUploadQueue() {
+  if (!isServerConnected) return;
+
+  File root = SD.open("/");
+  File file = root.openNextFile();
+
+  while (file) {
+    String fName = file.name();
+    if (fName.startsWith("/queue_") && fName.endsWith(".wav")) {
+      Serial.print("📤 Uploading: "); Serial.println(fName);
+      
+      // 1. LED Blink Fast (Uploading)
+      for(int i=0; i<5; i++) { digitalWrite(LED_PIN, LOW); delay(50); digitalWrite(LED_PIN, HIGH); delay(50); }
+
+      // 2. Tell Server to Expect File (Bypass Wake Word)
+      webSocket.sendTXT("{\"type\":\"start_upload\"}");
+      
+      // 3. Send Binary
+      File uploadFile = SD.open(fName);
+      uint8_t buf[512];
+      while (uploadFile.available()) {
+        int len = uploadFile.read(buf, 512);
+        webSocket.sendBIN(buf, len);
+        // Small delay to keep stack happy
+        if(millis() % 100 == 0) webSocket.loop(); 
+      }
+      uploadFile.close();
+
+      // 4. Tell Server File is Done
+      webSocket.sendTXT("{\"type\":\"end_upload\"}");
+      Serial.println("✅ Upload Done. Deleting file.");
+
+      // 5. Delete File
+      SD.remove(fName);
+      
+      // Stop after one file to allow other tasks (or loop to send all)
+      break; 
+    }
+    file = root.openNextFile();
+  }
+}
+
+// ==========================================
+// 📶 WEBSOCKET EVENTS
+// ==========================================
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[WSc] Disconnected!");
+      isServerConnected = false;
+      break;
+    case WStype_CONNECTED: {
+      Serial.println("[WSc] ✅ Connected to Server!");
+      isServerConnected = true;
+      String handshake = "{\"type\":\"handshake\", \"id\":\"" + String(DEVICE_ID) + "\", \"user\":\"" + String(USER_NAME) + "\"}";
+      webSocket.sendTXT(handshake);
+      break;
+    }
+  }
+}
+
+// ==========================================
+// 🚀 SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH); // OFF
+
+  // 1. Init SD
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("⚠️ SD Init Failed! (Check Wiring/Format)");
+    while(1) { digitalWrite(LED_PIN, LOW); delay(100); digitalWrite(LED_PIN, HIGH); delay(100); }
+  }
+  Serial.println("✅ SD Ready");
+
+  // 2. Init Mic
+  i2s_install();
+  i2s_setpin();
+  i2s_start(I2S_PORT);
+
+  // 3. Init WiFi (Non-Blocking attempt)
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting WiFi...");
+}
+
+// ==========================================
+// 🔄 LOOP
+// ==========================================
+void loop() {
+  webSocket.loop();
+
+  // 1. Manage Connectivity
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!isServerConnected) {
+       webSocket.begin(server_ip, server_port, "/");
+       webSocket.onEvent(webSocketEvent);
+       webSocket.setReconnectInterval(5000);
+    }
+    // Blink LED slowly to show Online but Idle
+    // (Optional: Remove if distracting)
+  }
+
+  // 2. Trigger Detection (Volume)
+  int32_t trigger_buff[64];
+  size_t bytes_read = 0;
+  i2s_read(I2S_PORT, &trigger_buff, 64 * sizeof(int32_t), &bytes_read, 0);
+
+  if (bytes_read > 0) {
+    for (int i = 0; i < bytes_read/4; i++) {
+      if (abs(trigger_buff[i] >> 14) > VOLUME_THRESHOLD) {
+        Serial.println("🔊 Loud Noise Detected! Recording...");
+        recordToQueue();
+        break; 
+      }
+    }
+  }
+
+  // 3. Upload Pending Files
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck > 2000) { // Check every 2 seconds
+    checkAndUploadQueue();
+    lastCheck = millis();
+  }
+}
