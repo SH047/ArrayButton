@@ -1,0 +1,576 @@
+With set up 
+# VAANI NODE — Setup Guide
+# Array Button · Architecture C: Standalone BLE Edge Node
+# =========================================================
+
+## HARDWARE WIRING (XIAO ESP32S3 Sense + SD Module)
+
+### Microphone (Built-in PDM — NO wiring needed)
+The XIAO ESP32S3 Sense has a built-in MSM261D3526H1CPM PDM mic.
+Firmware uses:  DATA→GPIO42   CLK→GPIO41
+
+### SD Card (external SPI module or XIAO Expansion Board)
+SD Module Pin   →  XIAO ESP32S3 Pin
+──────────────────────────────────
+MOSI            →  GPIO9  (D9)
+MISO            →  GPIO8  (D8)
+SCK             →  GPIO7  (D7)
+CS              →  GPIO4  (D4)   ← change SD_CS in .ino if different
+VCC             →  3.3V
+GND             →  GND
+
+⚠️ FORMAT SD CARD AS FAT32 before first use.
+⚠️ Max recommended card size: 32GB
+
+### LED (Built-in — NO wiring needed)
+Firmware uses GPIO21 (LED_BUILTIN on XIAO ESP32S3).
+
+---
+
+## ARDUINO IDE SETUP
+
+### 1. Add ESP32S3 Board Support
+File → Preferences → Additional Board Manager URLs:
+  https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+Tools → Board Manager → Search "esp32" → Install (Espressif Systems)
+
+### 2. Select Board
+Tools → Board → ESP32S3 Dev Module
+  (or search "XIAO ESP32S3" if listed)
+
+Board Settings:
+  USB CDC On Boot: Enabled
+  Flash Size:      8MB (or match your board)
+  Partition Scheme: Default 4MB with spiffs
+
+### 3. Install Libraries
+Tools → Manage Libraries:
+  - "NimBLE-Arduino" by h2zero  ← IMPORTANT: use NimBLE, not ESP32 BLE Arduino
+
+### 4. Flash
+Select correct COM port → Upload vaani_node.ino
+
+### 5. Tune WAKE_THRESHOLD
+Open Serial Monitor (115200 baud).
+Speak normally — watch the amplitude values printed.
+Adjust WAKE_THRESHOLD in the .ino:
+  Too many false triggers → increase (e.g., 2000)
+  Doesn't trigger on speech → decrease (e.g., 800)
+
+---
+
+## MAC PYTHON SETUP
+
+### 1. Install dependencies (run once)
+pip3 install bleak openai-whisper gspread oauth2client \
+             rapidfuzz word2number --break-system-packages
+
+brew install ffmpeg   # required by whisper
+
+### 2. Google Sheets credentials
+Place your credentials.json in the same folder as vaani_mac_receiver.py
+(Same credentials.json from your existing server.py setup)
+
+### 3. Run receiver
+cd vaani_mac_receiver_folder/
+python3 vaani_mac_receiver.py
+
+The script will:
+  - Scan BLE every 10 seconds
+  - Auto-connect when XIAO is in range
+  - Download all queued WAV files
+  - Run Whisper on each file
+  - Update Google Sheets inventory
+
+---
+
+## TESTING CHECKLIST
+
+Step 1 — ESP32S3 only:
+  [1] Flash firmware
+  [2] Open Serial Monitor
+  [3] Confirm: "[SD] OK"
+  [4] Confirm: "[MIC] PDM microphone ready"
+  [5] Confirm: "[BLE] Advertising as: Vaani_Node_1"
+  [6] Clap loudly → expect "[WAKE] Amplitude X > threshold"
+  [7] Wait 5s → expect "[SD] Saved: /queue_XXXXX.wav"
+  [8] Expect LED blinking 5 times
+
+Step 2 — BLE transfer:
+  [1] Run: python3 vaani_mac_receiver.py
+  [2] Ensure XIAO is advertising (check Serial Monitor)
+  [3] Expect: "[BLE] Found: Vaani_Node_1 @ XX:XX:XX"
+  [4] Expect: "[BLE] FILE_COUNT:1"
+  [5] Expect: "Saved: ./vaani_received/queue_XXXXX.wav"
+  [6] Expect: Whisper transcript printed
+  [7] Expect: Google Sheets updated
+
+---
+
+## ARCHITECTURE OVERVIEW
+
+                     ┌─────────────────────────┐
+                     │  XIAO ESP32S3 Sense      │
+                     │                          │
+  Loud audio ──────► │  PDM Mic → I2S → buffer  │
+                     │         ↓                │
+                     │  Amplitude > threshold?  │
+                     │         ↓ YES            │
+                     │  Record 5s → WAV         │
+                     │         ↓                │
+                     │  Save to SD (/queue_*.wav)│
+                     │         ↓                │
+                     │  LED blinks 5×           │
+                     │         ↓                │
+                     │  BLE Advertise           │
+                     └──────────┬───────────────┘
+                                │ BLE (when Mac in range)
+                     ┌──────────▼───────────────┐
+                     │  Mac — vaani_mac_receiver │
+                     │                          │
+                     │  BleakClient connects    │
+                     │  → GET_LIST              │
+                     │  → NEXT_FILE x N         │
+                     │  → ACK chunks            │
+                     │  → DELETE                │
+                     │         ↓                │
+                     │  WAV → Whisper STT       │
+                     │         ↓                │
+                     │  RapidFuzz parse cmd     │
+                     │         ↓                │
+                     │  Google Sheets update    │
+                     └──────────────────────────┘
+
+---
+
+## HOW THIS FITS INTO YOUR EXISTING ARRAY BUTTON SYSTEM
+
+Your existing Nodes A/B/C use:  WiFi → WebSocket → server.py
+
+The XIAO Vaani Node uses:       BLE → vaani_mac_receiver.py → same Sheets DB
+
+Both write to the SAME Google Sheets (ArrayButton_DB).
+Both appear in the SAME Streamlit dashboard.
+
+The XIAO node appears as "Vaani_Node_1" in the Node_ID column.
+Add it to dashboard.py by adding:
+  render_node("Shreyas (XIAO)", "Vaani_Node_1")
+
+---
+
+## STEP BREAKDOWN (for future sessions)
+
+Step 1 (DONE): ESP32S3 firmware — mic + SD + LED + BLE transfer
+Step 2 (DONE): Mac Python — BLE receiver + Whisper + Sheets update
+
+Future enhancements:
+  Step 3: Replace amplitude trigger with Edge Impulse wake word model
+           (train "Vaani" keyword at edge-impulse.com, export as Arduino lib)
+  Step 4: Add RTC module (DS3231) for real timestamps in filenames
+  Step 5: Add OLED display (SSD1306) showing recording/transfer status
+  Step 6: Merge vaani_mac_receiver.py into your existing server.py as a
+           parallel async task, so one script handles both WiFi nodes and BLE nodes
+
+#!/usr/bin/env python3
+"""
+================================================================
+  VAANI MAC RECEIVER — Array Button · Standalone BLE Node
+================================================================
+  PIPELINE (Mac side):
+    BLE scan → connect → receive WAV files →
+    Whisper STT → RapidFuzz command parse →
+    Google Sheets inventory update
+
+  This script replaces server.py for the BLE/offline use case.
+  The STT + inventory logic is DIRECTLY ported from your
+  existing server.py — same Whisper model, same Sheets logic.
+
+  INSTALL (run once):
+    pip3 install bleak openai-whisper gspread oauth2client \
+                 rapidfuzz word2number --break-system-packages
+
+  USAGE:
+    python3 vaani_mac_receiver.py
+
+  HOW IT WORKS:
+    1. Scans BLE for a device named "Vaani_Node_1"
+    2. Subscribes to STATUS and DATA characteristics
+    3. Sends "GET_LIST" → receives file count
+    4. For each file: sends "NEXT_FILE" → receives chunks → assembles WAV
+    5. Sends "DELETE" after confirmed receipt
+    6. Passes WAV to Whisper → parses command → updates inventory
+    7. Disconnects, keeps scanning for next connection
+
+  BLE UUIDs (must match firmware):
+    SERVICE  : 4fafc201-1fb5-459e-8fcc-c5c9c331914b
+    CTRL     : beb5483e-36e1-4688-b7f5-ea07361b26a8  (write)
+    STATUS   : d4e0b080-5571-4a5a-bc2a-6e2e68e8f8bc  (notify)
+    DATA     : f27b53ad-c63d-49a0-8c0f-9309cf93d944   (notify)
+================================================================
+"""
+
+import asyncio
+import struct
+import os
+import wave
+import json
+import datetime
+import time
+import re
+import io
+
+from bleak import BleakClient, BleakScanner
+
+# ─── OPTIONAL: Whisper + inventory (comment out if testing BLE only) ──
+try:
+    import whisper
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+    from rapidfuzz import process, fuzz
+    from word2number import w2n
+    FULL_PIPELINE = True
+except ImportError:
+    print("[WARN] whisper/gspread not installed. BLE transfer only.")
+    FULL_PIPELINE = False
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION — match to your existing server.py settings
+# ═══════════════════════════════════════════════════════════════
+
+# BLE
+DEVICE_NAME     = "Vaani_Node_1"        # must match DEVICE_ID in firmware
+SCAN_TIMEOUT    = 10.0                  # seconds per scan attempt
+
+# UUIDs (must match firmware exactly)
+SERVICE_UUID    = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+CTRL_UUID       = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+STATUS_UUID     = "d4e0b080-5571-4a5a-bc2a-6e2e68e8f8bc"
+DATA_UUID       = "f27b53ad-c63d-49a0-8c0f-9309cf93d944"
+
+# Local storage for received WAV files
+OUTBOX_DIR      = "./vaani_received"
+os.makedirs(OUTBOX_DIR, exist_ok=True)
+
+# Google Sheets (from your existing server.py)
+SHEET_NAME      = "ArrayButton_DB"
+CREDENTIALS_FILE = "credentials.json"   # same file as server.py
+
+# Inventory items + synonyms (DIRECTLY from your server.py)
+INVENTORY_ITEMS = ["Cement", "Bricks", "Dust", "Steel", "Water", "Sand", "Product"]
+SYNONYMS = {
+    "concrete": "Cement", "semment": "Cement",
+    "liquid":   "Water",  "aqua":   "Water",
+    "block":    "Bricks", "brick":  "Bricks",
+    "rod":      "Steel",  "iron":   "Steel",  "sariya": "Steel", "loha": "Steel",
+    "powder":   "Dust",
+    "ret":      "Sand",   "balu":   "Sand",
+    "eet":      "Bricks",
+}
+HINDI_NUMBERS = {
+    "ek": 1, "do": 2, "teen": 3, "char": 4, "paanch": 5,
+    "che": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10,
+    "bees": 20, "tees": 30, "chalis": 40, "pachas": 50, "sau": 100,
+}
+
+# User mapped from device (Node A = Shreyas, etc.)
+DEVICE_USER_MAP = {
+    "Vaani_Node_1": "Shreyas",
+    "Vaani_Node_2": "Likith",
+    "Vaani_Node_3": "Manoj",
+}
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 1: GOOGLE SHEETS DB (from server.py)
+# ═══════════════════════════════════════════════════════════════
+
+_logs_tab    = None
+_inv_tab     = None
+
+def get_db():
+    global _logs_tab, _inv_tab
+    if _logs_tab and _inv_tab:
+        return _logs_tab, _inv_tab
+    try:
+        scope = ["https://spreadsheets.google.com/feeds",
+                 "https://www.googleapis.com/auth/drive"]
+        creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+        wb     = client.open(SHEET_NAME)
+        _logs_tab = wb.worksheet("Logs")
+        _inv_tab  = wb.worksheet("Inventory")
+        print("[DB] Google Sheets connected.")
+        return _logs_tab, _inv_tab
+    except Exception as e:
+        print(f"[DB] ERROR: {e}")
+        return None, None
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 2: WHISPER STT
+# ═══════════════════════════════════════════════════════════════
+
+_whisper_model = None
+
+def get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        print("[STT] Loading Whisper small model...")
+        _whisper_model = whisper.load_model("small")
+        print("[STT] Whisper ready.")
+    return _whisper_model
+
+def transcribe(wav_path: str) -> str:
+    model = get_whisper()
+    try:
+        result = model.transcribe(wav_path, fp16=False)
+        text   = result['text'].strip().lower()
+        print(f"[STT] Whisper heard: '{text}'")
+        return text
+    except Exception as e:
+        print(f"[STT] Transcribe error: {e}")
+        return ""
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 3: COMMAND PARSER (from server.py)
+# ═══════════════════════════════════════════════════════════════
+
+def parse_quantity(text: str):
+    digits = re.findall(r'\d+', text)
+    if digits:
+        return int(digits[0])
+    for word, num in HINDI_NUMBERS.items():
+        if word in text:
+            return num
+    try:
+        return w2n.word_to_num(text)
+    except:
+        return None
+
+def process_command(wav_path: str, device_name: str):
+    """Full pipeline: WAV → Whisper → parse → Sheets update."""
+    text = transcribe(wav_path)
+
+    if not text or len(text) < 3 or text in ["you", "thank you", "subtitles"]:
+        print("[CMD] Ignored (silence or hallucination).")
+        return
+
+    # Apply synonyms
+    for wrong, right in SYNONYMS.items():
+        if wrong in text:
+            text = text.replace(wrong, right.lower())
+
+    print(f"[CMD] Processing: '{text}'")
+
+    item_match = process.extractOne(text, INVENTORY_ITEMS, scorer=fuzz.partial_ratio)
+    quantity   = parse_quantity(text)
+
+    if not (item_match and item_match[1] > 50 and quantity):
+        print(f"[CMD] Could not parse (item={item_match}, qty={quantity}). Skipped.")
+        return
+
+    item_name = item_match[0]
+    user_name = DEVICE_USER_MAP.get(device_name, "Unknown")
+    print(f"[CMD] ✅ ACTION → {user_name}: {item_name} -= {quantity}")
+
+    if not FULL_PIPELINE:
+        return
+
+    logs, inv = get_db()
+    if not logs or not inv:
+        print("[CMD] DB unavailable, action lost.")
+        return
+
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logs.append_row([ts, device_name, user_name, item_name, quantity, "Used"])
+
+        records = inv.get_all_records()
+        for i, row in enumerate(records):
+            if row['Item Name'] == item_name:
+                new_total = int(row['Total']) - quantity
+                inv.update_cell(i + 2, 2, new_total)
+                print(f"[DB] Stock updated: {item_name} → {new_total}")
+                break
+    except Exception as e:
+        print(f"[DB] Update error: {e}")
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 4: BLE FILE TRANSFER
+# ═══════════════════════════════════════════════════════════════
+
+class VaaniReceiver:
+    """Manages BLE connection + file reception state machine."""
+
+    def __init__(self, device_name: str):
+        self.device_name   = device_name
+        self.status_queue  = asyncio.Queue()
+        self.data_queue    = asyncio.Queue()
+        self.file_buffer   = bytearray()
+        self.current_fname = ""
+        self.expected_size = 0
+
+    def on_status(self, sender, data: bytearray):
+        msg = data.decode("utf-8", errors="ignore")
+        print(f"[BLE→] STATUS: {msg}")
+        self.status_queue.put_nowait(msg)
+
+    def on_data(self, sender, data: bytearray):
+        self.data_queue.put_nowait(bytes(data))
+
+    async def wait_status(self, timeout=15.0) -> str:
+        return await asyncio.wait_for(self.status_queue.get(), timeout)
+
+    async def transfer_all_files(self, client: BleakClient):
+        """Core state machine: request list → download each file → delete."""
+
+        # Subscribe to notifications
+        await client.start_notify(STATUS_UUID, self.on_status)
+        await client.start_notify(DATA_UUID,   self.on_data)
+
+        # Step 1: Request file count
+        await client.write_gatt_char(CTRL_UUID, b"GET_LIST", response=False)
+        msg = await self.wait_status(10)
+
+        if not msg.startswith("FILE_COUNT:"):
+            print("[BLE] Unexpected response to GET_LIST:", msg)
+            return
+
+        file_count = int(msg.split(":")[1])
+        print(f"[BLE] {file_count} files queued on device.")
+
+        if file_count == 0:
+            return
+
+        # Step 2: Download each file
+        for file_idx in range(file_count):
+            print(f"\n[BLE] Requesting file {file_idx+1}/{file_count}...")
+
+            await client.write_gatt_char(CTRL_UUID, b"NEXT_FILE", response=False)
+            msg = await self.wait_status(10)
+
+            if msg == "NO_FILES":
+                print("[BLE] No more files.")
+                break
+
+            if not msg.startswith("FILE_START:"):
+                print("[BLE] Unexpected:", msg)
+                break
+
+            # Parse FILE_START:filename:size
+            parts = msg.split(":")
+            # parts = ["FILE_START", "/queue_XXXXX.wav", "NNNNN"]
+            self.current_fname = parts[1] if len(parts) > 1 else f"file_{file_idx}.wav"
+            self.expected_size = int(parts[2]) if len(parts) > 2 else 0
+            self.file_buffer   = bytearray()
+
+            print(f"[BLE] Receiving: {self.current_fname} ({self.expected_size} bytes)")
+
+            # Step 3: Chunk loop — send ACK, receive chunk, repeat
+            while len(self.file_buffer) < self.expected_size:
+                await client.write_gatt_char(CTRL_UUID, b"ACK", response=False)
+
+                # Could come as STATUS (FILE_END) or DATA (chunk)
+                done = False
+                while True:
+                    # Check status queue (non-blocking)
+                    try:
+                        s = self.status_queue.get_nowait()
+                        if s == "FILE_END":
+                            done = True
+                            break
+                    except asyncio.QueueEmpty:
+                        pass
+
+                    # Check data queue
+                    try:
+                        chunk = self.data_queue.get_nowait()
+                        self.file_buffer.extend(chunk)
+                        pct = len(self.file_buffer) * 100 // max(self.expected_size, 1)
+                        print(f"\r[BLE] Progress: {pct}%  ", end="", flush=True)
+                        break
+                    except asyncio.QueueEmpty:
+                        await asyncio.sleep(0.01)
+
+                if done:
+                    break
+
+            print()  # newline after progress
+
+            # Step 4: Save received WAV file locally
+            safe_name = self.current_fname.replace("/", "_").lstrip("_")
+            local_path = os.path.join(OUTBOX_DIR, safe_name)
+
+            with open(local_path, "wb") as f:
+                f.write(self.file_buffer)
+
+            actual = len(self.file_buffer)
+            print(f"[FILE] Saved: {local_path} ({actual} bytes)")
+
+            # Step 5: Tell ESP to delete the file from SD
+            await client.write_gatt_char(CTRL_UUID, b"DELETE", response=False)
+            try:
+                msg = await self.wait_status(5)
+                print(f"[BLE] Delete response: {msg}")
+            except asyncio.TimeoutError:
+                pass
+
+            # Step 6: Process command (Whisper + Sheets)
+            if actual > 0 and FULL_PIPELINE:
+                print(f"[STT] Processing {local_path}...")
+                process_command(local_path, self.device_name)
+
+        print("[BLE] All files processed.")
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 5: MAIN SCAN + CONNECT LOOP
+# ═══════════════════════════════════════════════════════════════
+
+async def find_vaani_device():
+    """Scan BLE for the Vaani node by name."""
+    print(f"[BLE] Scanning for '{DEVICE_NAME}'...")
+    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
+    for d in devices:
+        if d.name and DEVICE_NAME in d.name:
+            print(f"[BLE] Found: {d.name} @ {d.address}")
+            return d
+    return None
+
+async def main():
+    print("=" * 55)
+    print("  VAANI MAC RECEIVER — Array Button BLE Node")
+    print("=" * 55)
+
+    if FULL_PIPELINE:
+        # Pre-warm Whisper model at startup
+        get_whisper()
+        # Pre-connect to DB
+        get_db()
+
+    while True:
+        device = await find_vaani_device()
+
+        if device is None:
+            print("[BLE] Device not in range. Retrying in 5s...")
+            await asyncio.sleep(5)
+            continue
+
+        try:
+            async with BleakClient(device.address, timeout=20.0) as client:
+                print(f"[BLE] Connected to {device.name}.")
+
+                receiver = VaaniReceiver(device.name or DEVICE_NAME)
+                await receiver.transfer_all_files(client)
+
+                print("[BLE] Transfer session complete. Disconnecting.")
+
+        except Exception as e:
+            print(f"[BLE] Connection error: {e}")
+
+        print("[BLE] Waiting 10s before next scan...\n")
+        await asyncio.sleep(10)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[EXIT] Stopped.")
