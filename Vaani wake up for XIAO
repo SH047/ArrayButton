@@ -1,0 +1,422 @@
+/*
+ * ================================================================
+ * VAANI NODE — XIAO ESP32S3 Sense
+ * EDGE IMPULSE WAKE WORD + BLE + SD TRANSFER + VAD
+ * ================================================================
+ */
+
+#include <Arduino.h>
+#include <driver/i2s.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+#include <NimBLEDevice.h>
+#include <string>
+
+// ================================================================
+// REPLACE THIS WITH YOUR EXACT EDGE IMPULSE LIBRARY NAME:
+#include <Shreyas47-project-1_inferencing.h> 
+// ================================================================
+
+// ─── DEVICE IDENTITY ────────────────────────────────────────────
+#define DEVICE_ID       "Vaani_Node_1"
+#define USER_NAME       "Shreyas"          
+
+// ─── PIN DEFINITIONS ────────────────────────────────────────────
+#define MIC_DATA_PIN    41  
+#define MIC_CLK_PIN     42  
+
+#define SD_MOSI         9
+#define SD_MISO         8
+#define SD_SCK          7
+#define SD_CS           21  
+
+#define LED_PIN         3   
+
+// ─── AUDIO CONFIG ───────────────────────────────────────────────
+#define SAMPLE_RATE       16000
+#define RECORD_SECONDS    5     
+#define I2S_PORT          I2S_NUM_0
+#define DMA_BUF_COUNT     8
+#define DMA_BUF_LEN       512
+#define CHUNK_SAMPLES     1024 
+
+// ─── VAD (VOICE ACTIVITY DETECTOR) THRESHOLD ────────────────────
+// If the loudest noise in 1 second is below this, skip the AI.
+// Tune this: ~500 for a quiet room, ~1000 for a noisy room.
+#define VAD_THRESHOLD     50  // <--- UPDATED TO 2500
+
+// ─── BLE SERVICE & CHARACTERISTIC UUIDs ────────────────────────
+#define SERVICE_UUID      "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CTRL_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"  
+#define STATUS_CHAR_UUID  "d4e0b080-5571-4a5a-bc2a-6e2e68e8f8bc"  
+#define DATA_CHAR_UUID    "f27b53ad-c63d-49a0-8c0f-9309cf93d944"   
+
+// ─── GLOBALS ────────────────────────────────────────────────────
+NimBLEServer* pServer     = nullptr;
+NimBLECharacteristic* pCtrlChar  = nullptr;
+NimBLECharacteristic* pStatusChar = nullptr;
+NimBLECharacteristic* pDataChar  = nullptr;
+
+bool    bleConnected   = false;
+bool    transferActive = false;
+String  currentFile    = "";
+File    transferFileHandle;
+bool    newCtrlCmd     = false;
+String  lastCtrlCmd    = "";
+
+#define BLE_CHUNK_SIZE  512    
+
+// Edge Impulse Audio Buffer
+int16_t inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+// ─── WAV HEADER WRITER ──────────────────────────────────────────
+struct wav_header_t {
+  char     riff_tag[4];
+  uint32_t riff_length;
+  char     wave_tag[4];
+  char     fmt_tag[4];
+  uint32_t fmt_length;
+  uint16_t audio_format;
+  uint16_t num_channels;
+  uint32_t sample_rate;
+  uint32_t byte_rate;
+  uint16_t block_align;
+  uint16_t bits_per_sample;
+  char     data_tag[4];
+  uint32_t data_length;
+};
+
+void buildWavHeader(wav_header_t* h, uint32_t dataBytes) {
+  memcpy(h->riff_tag, "RIFF", 4);
+  h->riff_length    = dataBytes + sizeof(wav_header_t) - 8;
+  memcpy(h->wave_tag, "WAVE", 4);
+  memcpy(h->fmt_tag,  "fmt ", 4);
+  h->fmt_length     = 16;
+  h->audio_format   = 1;
+  h->num_channels   = 1;
+  h->sample_rate    = SAMPLE_RATE;
+  h->byte_rate      = SAMPLE_RATE * 2;
+  h->block_align    = 2;
+  h->bits_per_sample = 16;
+  memcpy(h->data_tag, "data", 4);
+  h->data_length    = dataBytes;
+}
+
+// ─── I2S (PDM MIC) SETUP ────────────────────────────────────────
+void i2s_install() {
+  const i2s_config_t cfg = {
+    .mode             = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+    .sample_rate      = SAMPLE_RATE,
+    .bits_per_sample  = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S),
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count    = DMA_BUF_COUNT,
+    .dma_buf_len      = DMA_BUF_LEN,
+    .use_apll         = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk       = 0
+  };
+  i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
+}
+
+void i2s_setpin() {
+  const i2s_pin_config_t pins = {
+    .bck_io_num    = -1,          
+    .ws_io_num     = MIC_CLK_PIN, 
+    .data_out_num  = -1,
+    .data_in_num   = MIC_DATA_PIN
+  };
+  i2s_set_pin(I2S_PORT, &pins);
+}
+
+// ─── LED HELPERS ────────────────────────────────────────────────
+void ledOn()  { digitalWrite(LED_PIN, HIGH); }
+void ledOff() { digitalWrite(LED_PIN, LOW);  }
+
+void blinkConfirm(int times = 5, int ms = 120) {
+  for (int i = 0; i < times; i++) {
+    ledOn();  delay(ms);
+    ledOff(); delay(ms);
+  }
+}
+
+void blinkSlow() {
+  static unsigned long last = 0;
+  if (millis() - last > 1500) {
+    ledOn(); delay(50); ledOff();
+    last = millis();
+  }
+}
+
+// ─── SD HELPERS ─────────────────────────────────────────────────
+int getQueuedFileCount() {
+  int count = 0;
+  File root = SD.open("/");
+  File f = root.openNextFile();
+  while (f) {
+    String name = f.name();
+    if (name.startsWith("/v_") && name.endsWith(".wav")) count++;
+    f = root.openNextFile();
+  }
+  return count;
+}
+
+String getNextQueuedFile() {
+  File root = SD.open("/");
+  File f = root.openNextFile();
+  while (f) {
+    String name = f.name();
+    if (name.startsWith("/v_") && name.endsWith(".wav")) return name;
+    f = root.openNextFile();
+  }
+  return "";
+}
+
+// ─── CORE RECORDING FUNCTION ────────────────────────────────────
+void recordToSD() {
+  Serial.println("[REC] AI Trigger! Starting 5s command recording...");
+
+  if (bleConnected) pStatusChar->notify(std::string("RECORDING"));
+  ledOn(); 
+
+  String fileName = "/v_" + String(millis()) + ".wav"; 
+
+  File file = SD.open(fileName, FILE_WRITE);
+  if (!file) {
+    Serial.println("[SD] ERROR: Cannot open file for write!");
+    ledOff();
+    return;
+  }
+
+  wav_header_t header;
+  file.write((uint8_t*)&header, sizeof(wav_header_t));
+
+  int16_t  wav_buf[CHUNK_SAMPLES];   
+  size_t   bytesIn    = 0;
+  uint32_t totalBytes = 0;
+  uint32_t endTime    = millis() + (RECORD_SECONDS * 1000);
+
+  // Clear stale DMA buffers before recording
+  i2s_read(I2S_PORT, wav_buf, sizeof(wav_buf), &bytesIn, 0); 
+  delay(50); 
+
+  while (millis() < endTime) {
+    esp_err_t res = i2s_read(I2S_PORT, wav_buf, sizeof(wav_buf), &bytesIn, portMAX_DELAY);
+
+    if (res == ESP_OK && bytesIn > 0) {
+      file.write((uint8_t*)wav_buf, bytesIn);
+      totalBytes += bytesIn;
+    }
+  }
+
+  buildWavHeader(&header, totalBytes);
+  file.seek(0);
+  file.write((uint8_t*)&header, sizeof(wav_header_t));
+  file.close();
+
+  Serial.printf("[SD] Saved: %s (%u bytes)\n", fileName.c_str(), totalBytes);
+
+  ledOff();
+  blinkConfirm(5); 
+}
+
+// ─── BLE: GATT CALLBACKS ────────────────────────────────────────
+class VaaniServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pSvr, NimBLEConnInfo& connInfo) override {
+    bleConnected = true;
+    Serial.println("[BLE] Mac connected!");
+    pStatusChar->notify(std::string("CONNECTED"));
+  }
+  void onDisconnect(NimBLEServer* pSvr, NimBLEConnInfo& connInfo, int reason) override {
+    bleConnected  = false;
+    transferActive = false;
+    Serial.println("[BLE] Mac disconnected. Restarting advertising...");
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+class CtrlCharCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+    lastCtrlCmd = pCharacteristic->getValue().c_str();
+    newCtrlCmd  = true;
+    Serial.printf("[BLE] Ctrl cmd: %s\n", lastCtrlCmd.c_str());
+  }
+};
+
+void handleBleTransfer() {
+  if (!newCtrlCmd) return;
+  newCtrlCmd = false;
+  String cmd = lastCtrlCmd;
+
+  if (cmd == "GET_LIST") {
+    int n = getQueuedFileCount();
+    String resp = "FILE_COUNT:" + String(n);
+    pStatusChar->notify(std::string(resp.c_str()));
+  }
+  else if (cmd == "NEXT_FILE") {
+    currentFile = getNextQueuedFile();
+    if (currentFile == "") {
+      pStatusChar->notify(std::string("NO_FILES"));
+      return;
+    }
+    transferFileHandle = SD.open(currentFile);
+    if (!transferFileHandle) {
+      pStatusChar->notify(std::string("ERROR:open_failed"));
+      return;
+    }
+    size_t fSize = transferFileHandle.size();
+    String startMsg = "FILE_START:" + currentFile + ":" + String(fSize);
+    pStatusChar->notify(std::string(startMsg.c_str()));
+    transferActive = true;
+  }
+  else if (cmd == "ACK") {
+    if (!transferActive || !transferFileHandle) return;
+
+    if (transferFileHandle.available()) {
+      uint8_t chunk[BLE_CHUNK_SIZE];
+      int len = transferFileHandle.read(chunk, BLE_CHUNK_SIZE);
+      pDataChar->notify(chunk, len);
+      ledOn(); delay(10); ledOff();
+    } else {
+      transferFileHandle.close();
+      transferActive = false;
+      pStatusChar->notify(std::string("FILE_END"));
+    }
+  }
+  else if (cmd == "DELETE") {
+    if (currentFile != "") {
+      SD.remove(currentFile);
+      currentFile = "";
+      pStatusChar->notify(std::string("DELETE_OK"));
+    }
+  }
+}
+
+// ─── EDGE IMPULSE CALLBACK ──────────────────────────────────────
+int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
+    for (size_t i = 0; i < length; i++) {
+        out_ptr[i] = (float)inference_buffer[offset + i];
+    }
+    return 0;
+}
+
+// ─── SETUP ──────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== VAANI NODE: EDGE AI + VAD STARTING ===");
+
+  pinMode(LED_PIN, OUTPUT);
+  ledOff();
+
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("[SD] FAILED! Check wiring and ensure card is FAT32 formatted.");
+    while (true) { ledOn(); delay(100); ledOff(); delay(100); }
+  }
+
+  i2s_install();
+  i2s_setpin();
+  i2s_start(I2S_PORT);
+  Serial.println("[MIC] PDM microphone ready.");
+
+  NimBLEDevice::init(DEVICE_ID);
+  NimBLEDevice::setMTU(512); 
+
+  pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new VaaniServerCallbacks());
+
+  NimBLEService* pService = pServer->createService(SERVICE_UUID);
+
+  pStatusChar = pService->createCharacteristic(STATUS_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
+  pDataChar   = pService->createCharacteristic(DATA_CHAR_UUID,   NIMBLE_PROPERTY::NOTIFY);
+  
+  pCtrlChar = pService->createCharacteristic(CTRL_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  pCtrlChar->setCallbacks(new CtrlCharCallbacks());
+
+  pService->start();
+
+  NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+  pAdv->addServiceUUID(SERVICE_UUID);
+  NimBLEDevice::startAdvertising();
+
+  Serial.println("=== MODEL LOADED. LISTENING FOR 'VAANI' ===\n");
+}
+
+// ─── MAIN LOOP ──────────────────────────────────────────────────
+void loop() {
+  if (bleConnected) {
+    handleBleTransfer();
+    blinkSlow(); 
+  }
+
+  // 1. Record exactly 1 second into the inference buffer
+  size_t bytesRead = 0;
+  i2s_read(I2S_PORT, inference_buffer, sizeof(inference_buffer), &bytesRead, portMAX_DELAY);
+
+  if (bytesRead > 0) {
+    int samples = bytesRead / 2;
+    
+    // --- VAD (Voice Activity Detection) PASS ---
+    // Calculate DC Offset (Average voltage)
+    int64_t sum = 0;
+    for (int i = 0; i < samples; i++) {
+      sum += inference_buffer[i];
+    }
+    int16_t dc_offset = sum / samples;
+
+    // Find the max amplitude in this 1-second chunk
+    int16_t max_amplitude = 0;
+    for (int i = 0; i < samples; i++) {
+      int16_t ac_amplitude = abs(inference_buffer[i] - dc_offset);
+      if (ac_amplitude > max_amplitude) {
+        max_amplitude = ac_amplitude;
+      }
+    }
+
+    // If the room is quiet, skip the Neural Network entirely
+    if (max_amplitude < VAD_THRESHOLD) {
+      // NOTE: Re-comment the line below if you want to stop the serial monitor from spamming
+      Serial.printf("Silence (Max Amp: %d). Skipping AI.\n", max_amplitude); // <--- UNCOMMENTED
+      return; 
+    }
+
+    // --- EDGE IMPULSE ML PASS ---
+    // If we passed the VAD check, someone is making noise. Run the AI.
+    // 2. Wrap the buffer for Edge Impulse
+    signal_t signal;
+    signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+    signal.get_data = &microphone_audio_signal_get_data;
+
+    // 3. Run Inference
+    ei_impulse_result_t result = { 0 };
+    EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
+
+    if (r != EI_IMPULSE_OK) {
+        Serial.printf("[AI] ERR: Failed to run classifier (%d)\n", r);
+        return;
+    }
+
+    // 4. Evaluate results
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        // Look for the "Vaani" label
+        if (strcmp(result.classification[ix].label, "Vaani") == 0 || strcmp(result.classification[ix].label, "vaani") == 0) {
+            
+            // Confidence threshold (0.0 to 1.0)
+            if (result.classification[ix].value > 0.80) {
+                Serial.printf("\n[AI] MATCH! Wake word detected. Confidence: %.2f\n", result.classification[ix].value);
+                
+                // Fire the main recording sequence
+                recordToSD(); 
+                
+                // Flush stale I2S data generated during the SD write phase
+                size_t dummy;
+                i2s_read(I2S_PORT, inference_buffer, sizeof(inference_buffer), &dummy, 0);
+                break;
+            }
+        }
+    }
+  }
+}
