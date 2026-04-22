@@ -4,7 +4,9 @@ This code detects volume, records to SD card, and automatically uploads when WiF
 
 
 Component,Pin Name,ESP32-C3 Pin,Role
-SD Card,SCK,GPIO 4,SPI Clock
+SD Card,SCK,GPIO 4,SPI Cloc
+
+k
 SD Card,MISO,GPIO 5,SPI Data In
 SD Card,MOSI,GPIO 6,SPI Data Out
 SD Card,CS,GPIO 7,Chip Select
